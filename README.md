@@ -38,7 +38,15 @@ Requirements:
 - The Gradle Wrapper (downloads the pinned Gradle distribution on first run)
 - A `liblightpanda` built from the upstream embedding PR
 
-Build the upstream library using the instructions in its PR, then run:
+Build the upstream library from the repository at the PR head with Zig 0.16.0
+and its documented prerequisites. Use `ReleaseFast`: the default Debug build
+contains static TLS and cannot be loaded into an already-running JVM on Linux.
+
+```sh
+zig build lib -Ddev_fast=false -Doptimize=ReleaseFast
+```
+
+Then run the integration test:
 
 ```sh
 ./gradlew test -PlightpandaLibrary=/absolute/path/to/liblightpanda.so
@@ -48,4 +56,7 @@ The native test is skipped when `lightpandaLibrary` is not supplied. FFM is
 stable in JDK 22+; native access is enabled for the test JVM by the Gradle
 configuration. Applications using this binding should enable native access
 for the module containing it (for example, `--enable-native-access=ALL-UNNAMED`
-when using it from the class path).
+when using it from the class path). The wrapper keeps the native library mapped
+for the JVM lifetime: unloading it after `lp_shutdown` caused a JVM teardown
+crash in testing. Closing the Java browser shuts down Lightpanda but does not
+unload the shared library.

@@ -58,7 +58,9 @@ public final class EmbeddedLightpanda implements AutoCloseable {
         ownerThread = Thread.currentThread();
         arena = Arena.ofConfined();
         try {
-            SymbolLookup symbols = SymbolLookup.libraryLookup(libraryPath, arena);
+            // Unloading after lp_shutdown caused a JVM teardown crash; keep
+            // the mapping alive for the JVM lifetime.
+            SymbolLookup symbols = SymbolLookup.libraryLookup(libraryPath, Arena.global());
             Linker linker = Linker.nativeLinker();
 
             MethodHandle lpInit = bind(symbols, linker, "lp_init",

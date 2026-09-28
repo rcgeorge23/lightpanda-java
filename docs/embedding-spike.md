@@ -7,9 +7,10 @@
 ## Upstream status
 
 PR #3096 is still open and marked draft. Its proposed `include/lightpanda.h`
-and `src/c_api.zig` provide a C ABI over Lightpanda's browser-tool surface. The
-PR describes a shared-library build, but no released or locally available
-`liblightpanda` is present in this checkout.
+and `src/c_api.zig` provide a C ABI over Lightpanda's browser-tool surface.
+Built its exact head (`bbcc2f795d23d891dbbcd84f48773ea9be07fb63`) as a Linux
+x86_64 shared library with Zig 0.16.0 and ran the Java integration test against
+that library.
 
 The ABI is sufficient in shape for the first Java interaction flow:
 
@@ -53,16 +54,30 @@ functions and `lp_call` directly with FFM. The opt-in integration test starts
 a local HTTP server, navigates to a form, fills it, clicks submit, waits for
 JavaScript to create a welcome element, and extracts its text.
 
-This proves the intended Java-side call flow once run against the upstream
-library. It has **not yet been run end-to-end**: this environment has JDK 25,
-but no Zig toolchain or built `liblightpanda`. The Java source can still be
-compiled locally against the JDK 22 API surface.
+The default Debug build has `DF_STATIC_TLS` and an `R_X86_64_TPOFF64`
+relocation. FFM late loading fails with `Cannot open library`; the dynamic
+loader reports `cannot allocate memory in static TLS block`. Building with
+`zig build lib -Ddev_fast=false -Doptimize=ReleaseFast` removes the static-TLS
+flag and allows late lookup.
+
+The local form interaction passed against this ReleaseFast library on JDK 25
+from a normally started JVM, with `LD_PRELOAD` unset. The FFM library lookup is
+associated with `Arena.global()` so the shared object remains mapped through
+JVM shutdown. An earlier run using a confined library arena passed the test
+body but crashed during JVM shutdown after unloading Lightpanda; retaining the
+mapping avoided that crash. Closing the Java browser still closes sessions
+and calls `lp_shutdown`, but does not unload the library.
+
+The real-library test is verified on Linux x86_64 and JDK 25. JDK 22 and
+non-Linux data models remain unverified. The upstream C ABI is still draft, and
+its default Debug build is not suitable for late loading; consumers must use
+the documented ReleaseFast build or another build verified not to require
+static TLS.
 
 ## Open questions after the spike
 
-1. Build and run the integration test when upstream publishes/merges a usable
-   shared-library build; verify struct layout and all calls against that exact
-   binary.
+1. Agree with upstream on the supported release build configuration and ensure
+   a published native artifact uses a late-loadable TLS model.
 2. Confirm upstream support and intended behavior for submission events,
    navigation waits, timers/event-loop pumping, and repeated sessions.
 3. Measure startup, navigation, and interaction costs against standalone
@@ -76,7 +91,8 @@ compiled locally against the JDK 22 API surface.
 
 ## Conclusion
 
-The proposed C surface appears capable of the MVP interaction flow without
-JNI or a browser process boundary. A minimal FFM wrapper is technically
-straightforward, but the key success criteria remain unproven until the draft
-native library can be built and the opt-in local-server test passes.
+The proposed C surface can execute the MVP interaction flow through FFM against
+a real native build loaded after JVM startup, provided the Linux library is
+built in ReleaseFast mode and remains mapped for the JVM lifetime. The default
+Debug build still requires startup preloading, and the C ABI itself is still
+draft.
