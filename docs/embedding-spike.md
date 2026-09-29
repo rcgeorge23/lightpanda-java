@@ -19,6 +19,8 @@ The ABI is sufficient in shape for the first Java interaction flow:
   state.
 - `lp_call` dispatches existing browser tools, including `goto`, `fill`,
   `click`, `waitForSelector`, `extract`, and `evaluate`.
+- `lp_session_pump` advances timers and other background work while idle and
+  returns a recommended sleep delay as a C `uint32_t`.
 - `lp_last_error` and `lp_browser_last_error` provide diagnostic names;
   `lp_tools_json` describes tool schemas.
 
@@ -47,12 +49,16 @@ Java API can be designed after the native boundary has been exercised.
 - **Lifecycle:** Java `AutoCloseable` scopes the browser and sessions. Closing
   a browser closes remaining sessions before calling `lp_shutdown`.
 
+`lp_session_pump` runs on the initializing thread and does not invalidate
+borrowed `lp_result.text`. Its C delay is exposed as an unsigned Java `long`.
+
 ## Prototype and test
 
 `src/main/java/io/lightpanda/spike/EmbeddedLightpanda.java` binds the lifecycle
-functions and `lp_call` directly with FFM. The opt-in integration test starts
-a local HTTP server, navigates to a form, fills it, clicks submit, waits for
-JavaScript to create a welcome element, and extracts its text.
+functions, `lp_call`, and `lp_session_pump` directly with FFM. The opt-in
+integration test starts a local HTTP server, schedules a timer, verifies
+pump-driven `waitFor` progress, then navigates to a form, fills it, clicks
+submit, waits for its welcome element, and extracts text.
 
 The default Debug build has `DF_STATIC_TLS` and an `R_X86_64_TPOFF64`
 relocation. FFM late loading fails with `Cannot open library`; the dynamic
@@ -60,10 +66,10 @@ loader reports `cannot allocate memory in static TLS block`. Building with
 `zig build lib -Ddev_fast=false -Doptimize=ReleaseFast` removes the static-TLS
 flag and allows late lookup.
 
-The local form interaction passed against this ReleaseFast library on JDK 25
-from a normally started JVM, with `LD_PRELOAD` unset. The FFM library lookup is
-associated with `Arena.global()` so the shared object remains mapped through
-JVM shutdown. An earlier run using a confined library arena passed the test
+The local form and pump-driven timer interactions passed against this
+ReleaseFast library on JDK 25 from a normally started JVM, with `LD_PRELOAD`
+unset. The FFM library lookup uses `Arena.global()`, keeping the shared object
+mapped until JVM shutdown. An earlier run using a confined library arena passed the test
 body but crashed during JVM shutdown after unloading Lightpanda; retaining the
 mapping avoided that crash. Closing the Java browser still closes sessions
 and calls `lp_shutdown`, but does not unload the library.
@@ -78,8 +84,9 @@ static TLS.
 
 1. Agree with upstream on the supported release build configuration and ensure
    a published native artifact uses a late-loadable TLS model.
-2. Confirm upstream support and intended behavior for submission events,
-   navigation waits, timers/event-loop pumping, and repeated sessions.
+2. Confirm upstream support and intended behavior for submission events and
+   navigation waits; basic timer pumping and isolated sessions pass smoke tests,
+   but the broader event-loop scheduling contract remains unverified.
 3. Measure startup, navigation, and interaction costs against standalone
    Lightpanda over CDP; the current API's single-thread contract may limit
    concurrent test throughput.
@@ -92,7 +99,8 @@ static TLS.
 ## Conclusion
 
 The proposed C surface can execute the MVP interaction flow through FFM against
-a real native build loaded after JVM startup, provided the Linux library is
-built in ReleaseFast mode and remains mapped for the JVM lifetime. The default
-Debug build still requires startup preloading, and the C ABI itself is still
-draft.
+a real native build loaded after JVM startup. The integration test also
+confirms timer progress through `lp_session_pump`. Both require the Linux library
+to be built in ReleaseFast mode and remain mapped for the JVM lifetime. The
+default Debug build still requires startup preloading, and the C ABI itself is
+still draft.

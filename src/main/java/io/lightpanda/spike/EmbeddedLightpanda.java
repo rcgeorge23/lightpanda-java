@@ -39,6 +39,7 @@ public final class EmbeddedLightpanda implements AutoCloseable {
     private final MethodHandle lpSessionNew;
     private final MethodHandle lpSessionClose;
     private final MethodHandle lpCall;
+    private final MethodHandle lpSessionPump;
     private final MethodHandle lpBrowserLastError;
     private final MethodHandle lpLastError;
     private final MemorySegment browser;
@@ -79,6 +80,8 @@ public final class EmbeddedLightpanda implements AutoCloseable {
                             ValueLayout.ADDRESS, ValueLayout.JAVA_LONG,
                             ValueLayout.ADDRESS, ValueLayout.JAVA_LONG,
                             ValueLayout.ADDRESS));
+            lpSessionPump = bind(symbols, linker, "lp_session_pump",
+                    FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS));
             lpBrowserLastError = bind(symbols, linker, "lp_browser_last_error",
                     FunctionDescriptor.of(ValueLayout.ADDRESS,
                             ValueLayout.ADDRESS, ValueLayout.ADDRESS));
@@ -275,6 +278,21 @@ public final class EmbeddedLightpanda implements AutoCloseable {
                 }
                 return output;
             }
+        }
+
+        /**
+         * Runs one slice of this session's background work and returns the number of milliseconds
+         * Lightpanda recommends sleeping before pumping again. The call must stay on the browser's
+         * initializing thread, like every other native session operation.
+         *
+         * @return the unsigned native delay in milliseconds
+         */
+        public long pump() {
+            requireOpen();
+            if (sessionClosed) {
+                throw new IllegalStateException("Lightpanda session is closed");
+            }
+            return Integer.toUnsignedLong(invokeInt(lpSessionPump, handle));
         }
 
         @Override

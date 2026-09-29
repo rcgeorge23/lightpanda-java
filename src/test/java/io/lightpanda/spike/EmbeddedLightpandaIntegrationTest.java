@@ -9,12 +9,13 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class EmbeddedLightpandaIntegrationTest {
     @Test
-    void navigatesAndInteractsWithAJavaScriptPageInProcess() throws IOException {
+    void navigatesAndInteractsWithAJavaScriptPageInProcess() throws IOException, InterruptedException {
         String libraryPath = System.getProperty("lightpanda.library");
         Assumptions.assumeTrue(libraryPath != null && !libraryPath.isBlank(),
                 "Set -Dlightpanda.library to a built liblightpanda to run the native integration test");
@@ -27,6 +28,19 @@ class EmbeddedLightpandaIntegrationTest {
              EmbeddedLightpanda.Session page = browser.newSession()) {
             String url = "http://127.0.0.1:" + server.getAddress().getPort() + "/";
             page.call("goto", "{\"url\":\"" + url + "\"}");
+            page.call("evaluate", "{\"script\":\"setTimeout(() => document.body.dataset.pumped = 'yes', 20); 'scheduled'\"}");
+            long pumpDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+            boolean timerFired = false;
+            while (System.nanoTime() < pumpDeadline) {
+                long sleepMillis = page.pump();
+                Thread.sleep(Math.max(1, Math.min(sleepMillis, 10)));
+                String timerState = page.call("evaluate", "{\"script\":\"document.body.dataset.pumped === 'yes'\"}");
+                if (timerState.contains("true")) {
+                    timerFired = true;
+                    break;
+                }
+            }
+            assertTrue(timerFired, "session pumping should run JavaScript timers");
             page.call("fill", "{\"selector\":\"#email\",\"value\":\"fred@example.com\"}");
             page.call("click", "{\"selector\":\"button[type=submit]\"}");
             page.call("waitForSelector", "{\"selector\":\"#welcome\"}");

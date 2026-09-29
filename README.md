@@ -5,9 +5,10 @@ proposed Lightpanda C embedding API. This repository currently targets the
 upstream draft at [lightpanda-io/browser#3096](https://github.com/lightpanda-io/browser/pull/3096);
 it is a technical spike, not a released Java API.
 
-The spike includes an FFM wrapper for browser/session lifecycle and tool calls,
-plus an opt-in JUnit test that serves a local form and exercises navigation,
-typing, clicking, waiting for JavaScript-created DOM, and extracting text.
+The spike includes an FFM wrapper for browser/session lifecycle, tool calls,
+and `lp_session_pump` for advancing timer/background work between calls. An
+opt-in JUnit test serves a local form and exercises navigation, typing,
+clicking, pump-driven timer progress, and extracting text.
 
 See [the spike findings](docs/embedding-spike.md) for ABI constraints, current
 upstream status, and the checks that still require a built native library.
