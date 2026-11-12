@@ -47,7 +47,7 @@ dependencies {
 <dependency>
     <groupId>io.github.rcgeorge23</groupId>
     <artifactId>lightpanda-java</artifactId>
-    <version><!-- published version --></version>
+    <version>REPLACE_WITH_PUBLISHED_VERSION</version>
 </dependency>
 ```
 
