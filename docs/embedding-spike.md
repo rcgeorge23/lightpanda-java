@@ -52,6 +52,53 @@ Java API can be designed after the native boundary has been exercised.
 `lp_session_pump` runs on the initializing thread and does not invalidate
 borrowed `lp_result.text`. Its C delay is exposed as an unsigned Java `long`.
 
+## Console and JavaScript diagnostics (issue #9)
+
+**Checked:** 2026-11-20 against the same pinned native revision.
+
+The C ABI has no callback or event API for console messages or JavaScript
+exceptions. The observable native surface is the `consoleLogs` tool:
+
+- Sessions created through the C API already call
+  `Session.enableConsoleCapture()`.
+- `consoleLogs` drains a per-session text buffer and clears it. Messages are
+  formatted as `[<type>] <values>\n`, where type is one of `log`, `debug`,
+  `info`, `warning`, `error`, `fatal`, `trace`, `dir` or `dirxml`. An empty
+  buffer returns `No console messages.`.
+- The text format omits the native `ConsoleMessage` timestamp, source URL, line
+  and column. The Java API therefore returns messages with a type, origin and
+  text, but cannot attribute them to a navigation or script location.
+- Uncaught exceptions from event listeners, timers and top-level scripts, plus
+  unhandled promise rejections, call `Page.recordJsError`. That increments the
+  `js_errors` metric and logs a warning to stderr; it does not add an entry to
+  the console buffer. The C ABI has no equivalent of CDP
+  `Runtime.exceptionThrown` (see upstream issue #3904 for the CDP work).
+
+`EmbeddedLightpanda.Session` adds two methods over that surface:
+
+- `drainConsoleMessages()` calls `consoleLogs` and parses the text into
+  `ConsoleMessage` values. Draining clears the native buffer, so messages from
+  one session cannot leak into another.
+- `installJavascriptErrorCapture()` evaluates a page-level shim that listens for
+  `error` and `unhandledrejection`, formats the exception/rejection, and calls
+  `console.error` with a marker. The parser strips the marker and reports the
+  message origin as `UNCAUGHT_EXCEPTION` or `UNHANDLED_REJECTION`.
+
+The shim is deliberately opt-in because it changes page behaviour, and it must
+be installed again after every navigation. It cannot observe errors raised
+during page load before installation, or errors inside iframes and workers.
+Unhandled promise rejections can include resource-request failures. Native
+event hooks would remove these limitations; the request is tracked in
+[lightpanda-io/browser#4722](https://github.com/lightpanda-io/browser/issues/4722).
+
+Tool failures now throw `LightpandaException`, an `IllegalStateException`
+subclass. It retains the previous message and `Session.call` return format,
+while exposing whether the failure was a native non-zero status or an in-band
+tool error, the tool name, native status/error names, and the raw tool result
+when available. The integration test covers direct `console.error`, an event
+listener that throws, an unhandled rejection, per-session isolation, and both
+failure kinds.
+
 ## Prototype and test
 
 `src/main/java/io/lightpanda/spike/EmbeddedLightpanda.java` binds the lifecycle
@@ -100,7 +147,8 @@ static TLS.
 
 The proposed C surface can execute the MVP interaction flow through FFM against
 a real native build loaded after JVM startup. The integration test also
-confirms timer progress through `lp_session_pump`. Both require the Linux library
-to be built in ReleaseFast mode and remain mapped for the JVM lifetime. The
-default Debug build still requires startup preloading, and the C ABI itself is
-still draft.
+confirms timer progress through `lp_session_pump`, session-scoped console
+capture, the page-level JavaScript error shim, and structured tool failures. All
+require the Linux library to be built in ReleaseFast mode and remain mapped for
+the JVM lifetime. The default Debug build still requires startup preloading, and
+the C ABI itself is still draft.

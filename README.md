@@ -20,10 +20,12 @@ The current Java API is intentionally small:
 | `session.call("waitForSelector", json)` | Wait for an element to appear |
 | `session.call("evaluate", json)` | Execute JavaScript in the page |
 | `session.call("extract", json)` | Extract structured content using a selector schema |
+| `session.drainConsoleMessages()` | Read and clear buffered console output and captured JavaScript diagnostics |
+| `session.installJavascriptErrorCapture()` | Forward uncaught errors and promise rejections to the session console buffer |
 | `session.pump()` | Advance timers and other background work |
 | `session.close()` / `browser.close()` | Release session/browser resources |
 
-The `call` method takes the **native tool name and a JSON argument string**, and returns the native tool's result as a Java `String`. There are no Java `Page` or locator objects yet; you supply CSS selectors and JSON yourself. Tool failures throw `IllegalStateException`.
+The `call` method takes the **native tool name and a JSON argument string**, and returns the native tool's result as a Java `String`. There are no Java `Page` or locator objects yet; you supply CSS selectors and JSON yourself. Tool failures throw `LightpandaException`, an `IllegalStateException` subclass that also exposes the native status/error and in-band tool result.
 
 This is useful for lightweight web extraction, automation of forms and Java integration tests. Diglet can orchestrate such work, but it is not a dependency of `lightpanda-java`.
 
@@ -181,6 +183,52 @@ if (!ready) {
 
 The delay is a recommendation, not an automatic sleep: your Java code controls when to pump again. The [integration test](src/test/java/io/lightpanda/spike/EmbeddedLightpandaIntegrationTest.java) exercises this behaviour with the real native library.
 
+## Example 4: Read console output and JavaScript errors
+
+Direct `console.*` output is captured per session by Lightpanda. `drainConsoleMessages()` reads and clears that buffer, returning structured `ConsoleMessage` values:
+
+```java
+import io.lightpanda.spike.EmbeddedLightpanda.ConsoleMessage;
+import io.lightpanda.spike.LightpandaException;
+
+page.call("goto", """
+        {"url":"http://localhost:8080/"}
+        """);
+
+// Install after each navigation: the listeners belong to the current document.
+page.installJavascriptErrorCapture();
+
+// ...interact with the page or let asynchronous work run...
+page.call("click", """
+        {"selector":"#submit"}
+        """);
+
+for (ConsoleMessage message : page.drainConsoleMessages()) {
+    if (message.isErrorLevel()) {
+        System.err.println(message.origin() + ": " + message.text());
+    }
+}
+```
+
+- A direct `console.error(...)` produces a message with `origin() == CONSOLE` and `type() == ERROR`.
+- `installJavascriptErrorCapture()` adds page-level `error` and `unhandledrejection` listeners. Exceptions and rejections are forwarded to `console.error` and reported with the `UNCAUGHT_EXCEPTION` or `UNHANDLED_REJECTION` origin.
+- The native console tool does not expose timestamps, source URLs, line or column numbers, so messages are session-scoped but not tied to a particular navigation. The integration test checks that a second session does not inherit another session's messages.
+- The shim is not native exception capture. It must be installed after each navigation, and it cannot see errors raised before installation during page load or inside iframes/workers. Unhandled resource-request rejections may also appear. These gaps are tracked upstream in [lightpanda-io/browser#4722](https://github.com/lightpanda-io/browser/issues/4722).
+
+Native tool failures preserve the existing `String` return path for successful calls. Failures carry structured details:
+
+```java
+try {
+    page.call("click", """
+            {"selector":"#missing"}
+            """);
+} catch (LightpandaException failure) {
+    System.err.println(failure.tool());                       // "click"
+    System.err.println(failure.nativeStatusName().orElse("tool error"));
+    System.err.println(failure.nativeError().orElse(""));
+}
+```
+
 ## Build the native library
 
 The binding targets the **proposed embedding C ABI** from [Lightpanda PR #3096](https://github.com/lightpanda-io/browser/pull/3096), rather than the ordinary standalone Lightpanda executable. Installing an arbitrary Lightpanda release binary is **not enough**: you need a matching shared library exporting the `lp_*` functions.
@@ -208,7 +256,7 @@ This project ships with the Gradle 9.2.1 Wrapper:
 
 Alternatively, set the `LIGHTPANDA_LIBRARY` environment variable or `lightpanda.library` system property. The native integration test is **skipped** when no library path is provided. The Gradle test configuration already enables native access.
 
-The test runs a local HTTP server and verifies navigation, JavaScript timer pumping, form filling, clicking, waiting for a result and extraction.
+The test runs a local HTTP server and verifies navigation, JavaScript timer pumping, form filling, clicking, waiting for a result and extraction. It also verifies direct `console.error` capture, event-listener exceptions, unhandled promise rejections, session-scoped console isolation, and structured native tool failures.
 
 ## Current restrictions
 
@@ -217,6 +265,7 @@ The test runs a local HTTP server and verifies navigation, JavaScript timer pump
 - **Single process lifecycle:** Lightpanda can be initialised only once per process; after `browser.close()` invokes `lp_shutdown`, the native V8 runtime cannot be reinitialised in the same JVM. Use a separate JVM process for independent repeated runs.
 - **Native binary required:** No bundled native build, automatic download or cross-platform packaging is provided. Linux x86_64/JDK 25 was tested; JDK 22 is the minimum Java API level but its native integration has not been verified.
 - **Tool-oriented interface:** Browser operations use tool names and JSON, not type-safe locators, promises or Playwright APIs. Lightpanda's support for web platform features is incomplete.
+- **JavaScript error capture is a shim:** Native console capture covers direct `console.*` calls only. `installJavascriptErrorCapture()` must be reinvoked after navigation and cannot capture pre-load, iframe or worker errors. Native event hooks are requested in [lightpanda-io/browser#4722](https://github.com/lightpanda-io/browser/issues/4722).
 - **Licensing:** This repository is licensed under [AGPL-3.0-only](LICENSE); check the obligations for your intended use.
 
 For the exact ABI assumptions, native memory lifetime, platform details and remaining work, see [`docs/embedding-spike.md`](docs/embedding-spike.md).

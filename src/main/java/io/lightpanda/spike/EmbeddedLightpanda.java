@@ -21,6 +21,98 @@ import java.util.Objects;
  */
 public final class EmbeddedLightpanda implements AutoCloseable {
     private static final int LP_OK = 0;
+
+    /** Prefix written by {@link Session#installJavascriptErrorCapture()} for uncaught errors. */
+    public static final String UNCAUGHT_ERROR_MARKER = "[lightpanda-java:uncaught] ";
+
+    /** Prefix written by {@link Session#installJavascriptErrorCapture()} for promise rejections. */
+    public static final String UNHANDLED_REJECTION_MARKER =
+            "[lightpanda-java:unhandled-rejection] ";
+
+    private static final String NO_CONSOLE_MESSAGES = "No console messages.";
+
+    private static final String ERROR_CAPTURE_SCRIPT = """
+            (() => {
+              if (window.__lightpandaJavaErrorCaptureInstalled) {
+                return 'already installed';
+              }
+              window.__lightpandaJavaErrorCaptureInstalled = true;
+              const format = value => {
+                if (value instanceof Error) {
+                  return value.stack || (String(value.name || 'Error') + ': ' + String(value.message || ''));
+                }
+                if (typeof value === 'string') {
+                  return value;
+                }
+                try {
+                  return JSON.stringify(value);
+                } catch (_) {
+                  return String(value);
+                }
+              };
+              window.addEventListener('error', event => {
+                if (event && event.error !== undefined && event.error !== null) {
+                  console.error('%s' + format(event.error));
+                } else if (event && event.message) {
+                  console.error('%s' + event.message);
+                }
+              });
+              window.addEventListener('unhandledrejection', event => {
+                console.error('%s' + format(event.reason));
+              });
+              return 'installed';
+            })()
+            """.formatted(UNCAUGHT_ERROR_MARKER, UNCAUGHT_ERROR_MARKER, UNHANDLED_REJECTION_MARKER);
+
+    /**
+     * One message drained from the session's native console buffer.
+     *
+     * <p>Lightpanda's text-oriented console tool does not expose its native timestamp, source URL,
+     * line or column. Messages are therefore associated with a session but not with a particular
+     * navigation or script location.</p>
+     */
+    public record ConsoleMessage(Type type, Origin origin, String text) {
+        public ConsoleMessage {
+            Objects.requireNonNull(type, "type");
+            Objects.requireNonNull(origin, "origin");
+            Objects.requireNonNull(text, "text");
+        }
+
+        /** Console severity reported by Lightpanda. */
+        public enum Type {
+            LOG,
+            DEBUG,
+            INFO,
+            WARNING,
+            ERROR,
+            FATAL,
+            TRACE,
+            DIR,
+            DIRXML,
+            UNKNOWN
+        }
+
+        /** Where the message came from. */
+        public enum Origin {
+            /** A direct {@code console.*} call. */
+            CONSOLE,
+            /** An error forwarded by {@link Session#installJavascriptErrorCapture()}. */
+            UNCAUGHT_EXCEPTION,
+            /** A rejection forwarded by {@link Session#installJavascriptErrorCapture()}. */
+            UNHANDLED_REJECTION
+        }
+
+        /** Whether this message is an error-level console message. */
+        public boolean isErrorLevel() {
+            return type == Type.ERROR || type == Type.FATAL;
+        }
+
+        /** Whether this message was captured from a JavaScript exception or rejection. */
+        public boolean isJavascriptError() {
+            return origin != Origin.CONSOLE;
+        }
+    }
+
     private static final GroupLayout RESULT_LAYOUT = MemoryLayout.structLayout(
             ValueLayout.ADDRESS.withName("text"),
             ValueLayout.JAVA_LONG.withName("len"),
@@ -112,8 +204,9 @@ public final class EmbeddedLightpanda implements AutoCloseable {
 
         int status = invokeInt(lpSessionNew, browser, sessionOut);
         if (status != LP_OK) {
+            String nativeError = nativeError(lpBrowserLastError, browser);
             throw new IllegalStateException("lp_session_new failed: " + statusName(status)
-                    + nativeError(lpBrowserLastError, browser));
+                    + nativeErrorSuffix(nativeError));
         }
 
         MemorySegment handle = sessionOut.get(ValueLayout.ADDRESS, 0);
@@ -162,7 +255,13 @@ public final class EmbeddedLightpanda implements AutoCloseable {
         if (error.address() == 0 || byteLength <= 0) {
             return "";
         }
-        return "; Lightpanda error: " + decode(error, byteLength);
+        return decode(error, byteLength);
+    }
+
+    private static String nativeErrorSuffix(String nativeError) {
+        return nativeError == null || nativeError.isEmpty()
+                ? ""
+                : "; Lightpanda error: " + nativeError;
     }
 
     private static MethodHandle bind(SymbolLookup symbols, Linker linker,
@@ -229,6 +328,110 @@ public final class EmbeddedLightpanda implements AutoCloseable {
         return new String(bytes, StandardCharsets.UTF_8);
     }
 
+    private static String evaluateArguments(String script) {
+        return "{\"script\":" + jsonString(script) + "}";
+    }
+
+    private static String jsonString(String value) {
+        StringBuilder json = new StringBuilder(value.length() + 2);
+        json.append('"');
+        for (int i = 0; i < value.length(); i++) {
+            char character = value.charAt(i);
+            switch (character) {
+                case '"' -> json.append("\\\"");
+                case '\\' -> json.append("\\\\");
+                case '\b' -> json.append("\\b");
+                case '\f' -> json.append("\\f");
+                case '\n' -> json.append("\\n");
+                case '\r' -> json.append("\\r");
+                case '\t' -> json.append("\\t");
+                default -> {
+                    if (character < 0x20) {
+                        json.append(String.format("\\u%04x", (int) character));
+                    } else {
+                        json.append(character);
+                    }
+                }
+            }
+        }
+        return json.append('"').toString();
+    }
+
+    private static List<ConsoleMessage> parseConsoleMessages(String raw) {
+        if (raw == null || raw.isEmpty() || NO_CONSOLE_MESSAGES.equals(raw)) {
+            return List.of();
+        }
+
+        List<ConsoleMessage> messages = new ArrayList<>();
+        ConsoleMessage.Type currentType = null;
+        StringBuilder currentText = new StringBuilder();
+        int lineStart = 0;
+        while (lineStart < raw.length()) {
+            int newline = raw.indexOf('\n', lineStart);
+            boolean lastLine = newline < 0;
+            String line = lastLine ? raw.substring(lineStart) : raw.substring(lineStart, newline);
+
+            int prefixEnd = consolePrefixEnd(line);
+            if (prefixEnd > 0) {
+                if (currentType != null) {
+                    messages.add(consoleMessage(currentType, currentText.toString()));
+                }
+                currentType = consoleType(line.substring(1, prefixEnd - 2));
+                currentText.setLength(0);
+                currentText.append(line.substring(prefixEnd));
+            } else if (currentType != null) {
+                currentText.append('\n').append(line);
+            } else if (!line.isEmpty()) {
+                messages.add(consoleMessage(ConsoleMessage.Type.UNKNOWN, line));
+            }
+
+            if (lastLine) {
+                break;
+            }
+            lineStart = newline + 1;
+        }
+        if (currentType != null) {
+            messages.add(consoleMessage(currentType, currentText.toString()));
+        }
+        return List.copyOf(messages);
+    }
+
+    private static int consolePrefixEnd(String line) {
+        if (line.length() < 4 || line.charAt(0) != '[') {
+            return -1;
+        }
+        int close = line.indexOf("] ");
+        return close > 1 ? close + 2 : -1;
+    }
+
+    private static ConsoleMessage.Type consoleType(String name) {
+        return switch (name) {
+            case "log" -> ConsoleMessage.Type.LOG;
+            case "debug" -> ConsoleMessage.Type.DEBUG;
+            case "info" -> ConsoleMessage.Type.INFO;
+            case "warning" -> ConsoleMessage.Type.WARNING;
+            case "error" -> ConsoleMessage.Type.ERROR;
+            case "fatal" -> ConsoleMessage.Type.FATAL;
+            case "trace" -> ConsoleMessage.Type.TRACE;
+            case "dir" -> ConsoleMessage.Type.DIR;
+            case "dirxml" -> ConsoleMessage.Type.DIRXML;
+            default -> ConsoleMessage.Type.UNKNOWN;
+        };
+    }
+
+    private static ConsoleMessage consoleMessage(ConsoleMessage.Type type, String text) {
+        String message = text;
+        ConsoleMessage.Origin origin = ConsoleMessage.Origin.CONSOLE;
+        if (message.startsWith(UNCAUGHT_ERROR_MARKER)) {
+            origin = ConsoleMessage.Origin.UNCAUGHT_EXCEPTION;
+            message = message.substring(UNCAUGHT_ERROR_MARKER.length());
+        } else if (message.startsWith(UNHANDLED_REJECTION_MARKER)) {
+            origin = ConsoleMessage.Origin.UNHANDLED_REJECTION;
+            message = message.substring(UNHANDLED_REJECTION_MARKER.length());
+        }
+        return new ConsoleMessage(type, origin, message);
+    }
+
     private record Utf8(MemorySegment address, long length) {
         private static Utf8 allocate(Arena arena, String value) {
             byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
@@ -265,19 +468,53 @@ public final class EmbeddedLightpanda implements AutoCloseable {
                         nativeTool.address(), nativeTool.length(),
                         nativeArguments.address(), nativeArguments.length(), result);
                 if (status != LP_OK) {
-                    throw new IllegalStateException("Lightpanda tool '" + tool + "' failed: "
-                            + statusName(status) + nativeError(lpLastError, handle));
+                    String statusName = statusName(status);
+                    String nativeError = nativeError(lpLastError, handle);
+                    throw LightpandaException.callFailed(tool, status, statusName, nativeError,
+                            "Lightpanda tool '" + tool + "' failed: " + statusName
+                                    + nativeErrorSuffix(nativeError));
                 }
 
                 long length = result.get(ValueLayout.JAVA_LONG, LENGTH_OFFSET);
                 MemorySegment text = result.get(ValueLayout.ADDRESS, TEXT_OFFSET);
                 String output = length == 0 || text.address() == 0 ? "" : decode(text, length);
                 if (result.get(ValueLayout.JAVA_BOOLEAN, IS_ERROR_OFFSET)) {
-                    throw new IllegalStateException("Lightpanda tool '" + tool
-                            + "' returned an error: " + output);
+                    throw LightpandaException.toolError(tool, output);
                 }
                 return output;
             }
+        }
+
+        /**
+         * Drains and clears this session's native console buffer.
+         *
+         * <p>Lightpanda captures direct {@code console.*} calls per session. Messages forwarded by
+         * {@link #installJavascriptErrorCapture()} are also returned, with an origin identifying
+         * the exception or rejection rather than a direct console call.</p>
+         *
+         * @return an immutable snapshot of the buffered messages; empty when nothing is buffered
+         */
+        public List<ConsoleMessage> drainConsoleMessages() {
+            return parseConsoleMessages(call("consoleLogs", "{}"));
+        }
+
+        /**
+         * Installs page-level listeners that forward uncaught errors and unhandled promise
+         * rejections to {@code console.error}, making them available through
+         * {@link #drainConsoleMessages()}.
+         *
+         * <p>Lightpanda's native C ABI does not expose these exceptions as events. This helper is a
+         * page-level shim, not native capture. Call it again after every navigation, because the
+         * listeners belong to the current document. Errors raised before installation, during page
+         * load before the shim runs, and inside iframes or workers are not captured. Rejection
+         * events may include failures from page resource requests, so callers that fail tests on
+         * JavaScript errors should consider whether those are meaningful for their application.</p>
+         *
+         * <p>Calling this method repeatedly on the same document is safe; the underlying listener
+         * installation is idempotent.</p>
+         */
+        public void installJavascriptErrorCapture() {
+            call("evaluate", evaluateArguments(ERROR_CAPTURE_SCRIPT));
         }
 
         /**
