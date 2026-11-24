@@ -8,6 +8,24 @@ Create a session, navigate, fill forms, click elements, evaluate JavaScript, ext
 
 > **Experimental native ABI:** This library targets the proposed API in [lightpanda-io/browser#3096](https://github.com/lightpanda-io/browser/pull/3096), which is not a stable released embedding interface. You must build or supply a **compatible native shared library**. The verified configuration is **Linux x86_64 + JDK 25 + Zig 0.16.0** at a pinned upstream commit; JDK 22 is the minimum Java API version. See [compatibility and limitations](#compatibility-and-limitations) before using it in production.
 
+## Want a higher-level Java API?
+
+If you are writing Java web integration tests rather than working directly with Lightpanda's native tools, consider [Diglet](https://github.com/rcgeorge23/diglet). It provides a fluent `WebTest` abstraction over navigation, CSS selectors, form interactions, waits, JavaScript evaluation and assertions, so you do not have to construct JSON tool calls yourself. Diglet can use this binding through its opt-in `Browser.EMBEDDED_LIGHTPANDA` backend:
+
+```java
+import io.github.rcgeorge23.diglet.WebTest;
+
+try (WebTest web = new WebTest(8080, WebTest.Browser.EMBEDDED_LIGHTPANDA)) {
+    web.navigateTo("/signup")
+       .setInputValue("#email", "fred@example.com")
+       .click("button[type=submit]")
+       .waitFor(page -> page.selectFirst("#welcome") != null)
+       .assertPageTextContains("Welcome fred@example.com");
+}
+```
+
+Diglet is a **separate, optional testing library**. For embedded mode you still need to add a compatible `lightpanda-java` dependency and native shared library; Diglet does not remove the experimental ABI, platform, threading or licensing restrictions described below. See [Diglet's embedded Lightpanda setup](https://github.com/rcgeorge23/diglet#embedded-lightpanda-experimental). Use `lightpanda-java` directly when you want low-level access to Lightpanda sessions and native tool responses.
+
 ## Quick start
 
 ### 1. Add the Java dependency
